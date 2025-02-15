@@ -7,7 +7,7 @@ import escapeStringRegexp from 'escape-string-regexp';
 import { tracked } from '@glimmer/tracking';
 
 export default class KvListFilterComponent extends Component {
-    @service router;
+    @service('app-router') router;
     @tracked filterIsFocused = false;
 
     navigate(pathToSecret, pageFilter) {
