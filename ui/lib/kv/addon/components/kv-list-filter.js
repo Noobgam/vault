@@ -1,89 +1,122 @@
-/**
- * Copyright (c) HashiCorp, Inc.
- * SPDX-License-Identifier: BUSL-1.1
- */
-
-import Ember from 'ember';
 import Component from '@glimmer/component';
-import { service } from '@ember/service';
+import { inject as service } from '@ember/service';
 import { action } from '@ember/object';
 import keys from 'core/utils/key-codes';
 import { keyIsFolder, parentKeyForKey, keyWithoutParentKey } from 'core/utils/key-utils';
+import escapeStringRegexp from 'escape-string-regexp';
 import { tracked } from '@glimmer/tracking';
-import { task, timeout } from 'ember-concurrency';
-
-/**
- * @module KvListFilter
- * `KvListFilter` is used for filtering on the KV metadata LIST response.
- * It allows users to search for any text, and will transition to the list
- * page with the appropriate parameters depending on the query. This component
- * expects that the component will be re-constructed after search, since the
- * route will reload the model and completely refresh the page.
- *  *
- * <KvListFilter
- *  @secrets={{this.model.secrets}}
- *  @mountPoint={{this.model.mountPoint}}
- *  @filterValue="beep/my-"
- * />
- * @param {array} secrets - An array of secret models.
- * @param {string} mountPoint - Where in the router files we're located. For this component it will always be vault.cluster.secrets.backend.kv
- * @param {string} filterValue - Full initial search value. A concatenation between the list-directory's dynamic path "path-to-secret" and the queryParam "pageFilter". For example, if we're inside the beep/ directory searching for any secret that starts with "my-" this value will equal "beep/my-".
- */
 
 export default class KvListFilterComponent extends Component {
-  @service('app-router') router;
-  @tracked query;
+    @service router;
+    @tracked filterIsFocused = false;
 
-  constructor() {
-    super(...arguments);
-    this.query = this.args.filterValue;
-  }
-
-  navigate(pathToSecret, pageFilter) {
-    const route = pathToSecret ? `${this.args.mountPoint}.list-directory` : `${this.args.mountPoint}.list`;
-    const args = [route];
-    if (pathToSecret) {
-      args.push(pathToSecret);
+    navigate(pathToSecret, pageFilter) {
+        const route = pathToSecret ? `${this.args.mountPoint}.list-directory` : `${this.args.mountPoint}.list`;
+        const args = [route];
+        if (pathToSecret) {
+            args.push(pathToSecret);
+        }
+        args.push({
+            queryParams: {
+                pageFilter: pageFilter ? pageFilter : null,
+            },
+        });
+        this.router.transitionTo(...args);
     }
-    args.push({
-      queryParams: {
-        pageFilter: pageFilter ? pageFilter : null,
-      },
-    });
-    this.router.transitionTo(...args);
-  }
 
-  @action
-  handleKeyDown(event) {
-    if (event.keyCode === keys.ESC) {
-      // On escape, transition to the nearest parentDirectory.
-      // If no parentDirectory, then to the list route.
-      const input = event.target.value;
-      const parentDirectory = parentKeyForKey(input);
-      !parentDirectory ? this.navigate() : this.navigate(parentDirectory);
+    get partialMatch() {
+        const value = !this.args.pageFilter ? '' : this.args.pageFilter;
+        const reg = new RegExp('^' + escapeStringRegexp(value));
+        const match = this.args.secrets.filter((path) => reg.test(path.fullSecretPath))[0];
+        if (this.isFilterMatch || !match) return null;
+        return match.fullSecretPath;
     }
-    // ignore all other key events
-  }
 
-  @action handleInput(evt) {
-    this.query = evt.target.value;
-  }
-
-  @task
-  *handleSearch(evt) {
-    evt.preventDefault();
-    // shows loader to indicate that the search was executed
-    yield timeout(Ember.testing ? 0 : 250);
-    const searchTerm = this.query;
-    const isDirectory = keyIsFolder(searchTerm);
-    const parentDirectory = parentKeyForKey(searchTerm);
-    const secretWithinDirectory = keyWithoutParentKey(searchTerm);
-    if (isDirectory) {
-      this.navigate(searchTerm);
-    } else if (parentDirectory) {
-      this.navigate(parentDirectory, secretWithinDirectory);
-    } else {
-      this.navigate(null, searchTerm);
+    get isFilterMatch() {
+        return !!this.args.secrets?.findBy('fullSecretPath', this.args.filterValue);
     }
-  }
+
+    @action
+    handleInput(event) {
+        const input = event.target.value;
+        const isDirectory = keyIsFolder(input);
+        const parentDirectory = parentKeyForKey(input);
+        const secretWithinDirectory = keyWithoutParentKey(input);
+
+        if (isDirectory) {
+            this.navigate(input);
+        } else if (parentDirectory) {
+            this.navigate(parentDirectory, secretWithinDirectory);
+        } else {
+            this.navigate(null, input);
+        }
+    }
+
+    @action
+    handleKeyDown(event) {
+        const input = event.target.value;
+        const parentDirectory = parentKeyForKey(input);
+
+        if (event.keyCode === keys.BACKSPACE) {
+            this.handleBackspace(input, parentDirectory);
+        }
+        if (event.keyCode === keys.TAB) {
+            event.preventDefault();
+            this.handleTab();
+        }
+        if (event.keyCode === keys.ENTER) {
+            event.preventDefault();
+            this.handleEnter(input);
+        }
+        if (event.keyCode === keys.ESC) {
+            this.handleEscape(parentDirectory);
+        }
+    }
+
+    handleBackspace(input, parentDirectory) {
+        const isInputDirectory = keyIsFolder(input);
+        const inputWithoutParentKey = keyWithoutParentKey(input);
+        const pageFilter = isInputDirectory ? '' : inputWithoutParentKey.slice(0, -1);
+        this.navigate(parentDirectory, pageFilter);
+    }
+
+    handleTab() {
+        const isMatchDirectory = keyIsFolder(this.partialMatch);
+        const matchParentDirectory = parentKeyForKey(this.partialMatch);
+        const matchWithinDirectory = keyWithoutParentKey(this.partialMatch);
+
+        if (isMatchDirectory) {
+            this.navigate(this.partialMatch);
+        } else if (!isMatchDirectory && matchParentDirectory) {
+            this.navigate(matchParentDirectory, matchWithinDirectory);
+        } else {
+            this.navigate(null, this.partialMatch);
+        }
+    }
+
+    handleEnter(input) {
+        if (this.isFilterMatch) {
+            this.router.transitionTo(`${this.args.mountPoint}.secret.details`, input);
+        } else {
+            this.router.transitionTo(`${this.args.mountPoint}.create`, {
+                queryParams: { initialKey: input },
+            });
+        }
+    }
+
+    handleEscape(parentDirectory) {
+        !parentDirectory ? this.navigate() : this.navigate(parentDirectory);
+    }
+
+    @action
+    setFilterIsFocused() {
+        this.filterIsFocused = true;
+    }
+
+    @action
+    focusInput() {
+        if (this.args.filterValue) {
+            document.getElementById('secret-filter')?.focus();
+        }
+    }
 }
